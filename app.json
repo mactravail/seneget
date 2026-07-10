@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "sellscan",
-    "slug": "sellscan",
+    "name": "SeneGet",
+    "slug": "seneget",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "sellscan",
+    "scheme": "seneget",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon"
@@ -20,11 +20,17 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "output": "static",
+      "output": "server",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "SeneGet usa la fotocamera per osservare ciò che hai davanti e descrivertelo a voce."
+        }
+      ],
       [
         "expo-splash-screen",
         {

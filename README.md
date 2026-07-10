@@ -1,56 +1,140 @@
-# Welcome to your Expo app 👋
+# SeneGet
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+App mobile pensata per le **persone cieche o ipovedenti**: usa la fotocamera del telefono e un modello di visione AI (Claude) per **descrivere a voce, in tempo reale, ciò che l'utente ha davanti**. Diventa i suoi occhi, per aiutarla a camminare in sicurezza.
 
-## Get started
+L'utente apre l'app e la fotocamera si attiva da sola. L'AI osserva la scena in continuo e, ogni volta che qualcosa di importante cambia, pronuncia una frase breve e naturale — *"A circa dieci metri sta arrivando un autobus rosso, numero 12."*, *"Alla tua destra c'è una porta."*, *"Una persona sta attraversando davanti a te."*
 
-1. Install dependencies
+**L'audio è l'unica interfaccia: nessuna descrizione viene mostrata a schermo.**
 
-   ```bash
-   npm install
-   ```
+---
 
-2. Start the app
+## Principi
 
-   ```bash
-   npx expo start
-   ```
+- **Voice first** — l'app parla, non scrive. Niente testo da leggere.
+- **Solo ciò che vede** — mai dettagli inventati. Se il modello non è sicuro usa *"sembra esserci…"* o tace.
+- **Priorità alla sicurezza** — prima gli ostacoli immediati e le persone, poi il resto.
+- **Niente ripetizioni** — parla solo quando la scena cambia (nuovo oggetto, oggetto scomparso, cambio di distanza, direzione o situazione).
+- **Bassa latenza** — frasi corte, un frame ogni ~1s, una richiesta alla volta.
 
-In the output, you'll find options to open the app in a
+---
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## Stack
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+- **App:** React Native + Expo (SDK 57), Expo Router, TypeScript
+- **Fotocamera:** `expo-camera` (`CameraView`)
+- **Frame:** ridimensionati con `expo-image-manipulator` prima dell'invio
+- **Voce (TTS):** `expo-speech` (sintesi vocale in italiano)
+- **AI:** Claude (Anthropic) via **API route Expo** (`/api/analyze`) — la chiave resta lato server
+- **Output AI:** JSON strutturato (structured outputs) validato contro uno schema
 
-## Get a fresh project
+---
 
-When you're ready, run:
+## Prerequisiti
+
+- Node.js 18+ (testato con 24)
+- Una chiave API Anthropic
+- Per provarla su telefono: l'app **Expo Go** (Android) oppure la fotocamera (iOS) per scansionare il QR.
+  In alternativa un emulatore Android / simulatore iOS.
+
+> La fotocamera **non funziona nell'emulatore web**: serve un dispositivo o emulatore reale.
+> Sul web (`index.web.tsx`) è servita solo la home page di presentazione.
+
+---
+
+## Configurazione
 
 ```bash
-npm run reset-project
+cd seneget
+cp .env.example .env
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Apri `.env` e inserisci la tua chiave:
 
-### Other setup steps
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+### Scelta del modello
 
-## Learn more
+Il default è `claude-haiku-4-5` — il più veloce ed economico, con la minore latenza: ideale per la
+descrizione **frame-by-frame** in continuo. Per descrizioni più accurate (ma più lente e costose)
+puoi passare a Opus:
 
-To learn more about developing your project with Expo, look at the following resources:
+```
+ANTHROPIC_MODEL=claude-opus-4-8
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Entrambi i modelli supportano vision e output JSON strutturato.
 
-## Join the community
+---
 
-Join our community of developers creating universal apps.
+## Avvio
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+npx expo start
+```
+
+Poi:
+- **Android:** apri **Expo Go** e scansiona il QR nel terminale.
+- **iOS:** scansiona il QR con l'app Fotocamera e apri in Expo Go.
+- **Emulatore:** premi `a` (Android) o `i` (iOS) nel terminale.
+
+Concedi l'accesso alla fotocamera, punta il telefono davanti a te e ascolta. Un **tocco sullo schermo** mette in pausa o riprende le descrizioni.
+
+> **Rete:** in sviluppo l'app rileva automaticamente l'host del dev server (Metro) per raggiungere `/api/analyze`,
+> quindi il telefono deve essere sulla **stessa rete Wi-Fi** del computer.
+> Per build standalone/produzione imposta `EXPO_PUBLIC_API_URL` all'URL pubblico dell'API.
+
+---
+
+## Come funziona
+
+```
+Fotocamera ──(1 frame / ~1s)──▶ resize 768px + JPEG base64
+        │
+        ▼
+POST /api/analyze  (server, Expo API route)
+        │  costruisce la richiesta a Claude:
+        │  immagine + istruzioni + riepilogo della scena precedente
+        ▼
+Claude (vision, JSON strutturato) ──▶ Scene { speech, changed, summary, alert, objects }
+        │
+        ▼
+se `changed` e `speech` non vuoto ──▶ expo-speech pronuncia la frase (in italiano)
+        │
+        ▼
+`summary` viene rimandato al frame successivo per rilevare i cambiamenti
+```
+
+- **Nessun dettaglio inventato:** il modello descrive solo ciò che vede; quando non è sicuro usa *"sembra esserci…"* o omette.
+- **Niente ripetizioni:** il modello confronta la scena con il `summary` dell'ultima frase pronunciata e parla solo se qualcosa di rilevante è cambiato.
+- **Avvisi:** quando `alert` è vero (ostacolo immediato / pericolo) la frase interrompe subito quella eventualmente in corso.
+- L'utente non vede mai i dati strutturati (`objects`, distanze, confidenza): servono solo a generare la voce.
+
+### File principali
+
+| File | Ruolo |
+|------|-------|
+| `src/components/vision-screen.tsx` | Fotocamera + loop di cattura e descrizione a voce (il cuore dell'app) |
+| `src/app/index.tsx` | Route nativa `/`: apre subito la fotocamera |
+| `src/app/index.web.tsx` | Home page di presentazione (solo web) |
+| `src/app/login.tsx` | Login (flusso web «Provala → Login → App») |
+| `src/app/api/analyze+api.ts` | Backend: chiama Claude con l'immagine e restituisce la `Scene` JSON |
+| `src/lib/types.ts` | Tipo `Scene`, oggetti rilevati, schema JSON |
+| `src/lib/analyze.ts` | Client: invia il frame all'API (con auto-rilevamento dell'host) |
+| `src/lib/speech.ts` | Sintesi vocale in italiano (`expo-speech`) |
+
+---
+
+## Note su costi e latenza
+
+Una vera chiamata a un modello di visione richiede ~1–3s e ha un costo per immagine.
+Per questo l'app cattura in continuo ma invia al modello solo **un frame ogni ~1s** e mai in sovrapposizione
+(una richiesta alla volta). Regola l'intervallo in `src/components/vision-screen.tsx` (`FRAME_INTERVAL_MS`).
+
+## Prossimi passi
+
+- Regolazione di velocità e voce della sintesi vocale nelle impostazioni.
+- Gesti dedicati (es. doppio tocco) per ripetere l'ultima descrizione.
+- Segnale acustico distinto per gli avvisi di pericolo prima della frase.
+- Feedback aptico (vibrazione) per gli ostacoli immediati.
