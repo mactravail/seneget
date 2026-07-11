@@ -2,7 +2,7 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
 import { supabase } from './supabase';
-import { Scene } from './types';
+import { Mode, Scene } from './types';
 
 /**
  * URL base a cui inviare le richieste all'API route `/api/analyze`.
@@ -28,11 +28,16 @@ export function getApiBase(): string {
 /**
  * Invia un frame (JPEG in base64) all'API e restituisce la descrizione di scena.
  * `previousSummary` dà continuità: il modello parla solo se la scena è cambiata.
+ * `mode` regola lo stile: `explore` descrive l'ambiente, `walk` avvisa solo dei
+ * pericoli sul percorso con frasi brevissime.
  */
 export async function analyzeScene(
   imageBase64: string,
-  previousSummary?: string,
-  signal?: AbortSignal,
+  {
+    previousSummary,
+    mode = 'explore',
+    signal,
+  }: { previousSummary?: string; mode?: Mode; signal?: AbortSignal } = {},
 ): Promise<Scene> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
@@ -46,7 +51,7 @@ export async function analyzeScene(
   const res = await fetch(`${getApiBase()}/api/analyze`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ image: imageBase64, previousSummary }),
+    body: JSON.stringify({ image: imageBase64, previousSummary, mode }),
     signal,
   });
 

@@ -16,19 +16,32 @@ const LANGUAGE = 'it-IT';
  * spezzare una descrizione a metà): in quel caso restituisce `false`.
  * Con `force: true` (usato per gli avvisi urgenti) interrompe e parla subito.
  *
+ * `onDone` viene chiamato quando la frase finisce di essere pronunciata: utile
+ * per incatenare un'azione (es. avviare il microfono) senza sovrapporre l'audio.
+ *
  * @returns `true` se la frase è stata avviata, `false` se è stata ignorata.
  */
 export async function speak(
   text: string,
-  { force = false }: { force?: boolean } = {},
+  { force = false, onDone }: { force?: boolean; onDone?: () => void } = {},
 ): Promise<boolean> {
   const t = text.trim();
-  if (!t) return false;
+  if (!t) {
+    onDone?.();
+    return false;
+  }
 
   if (!force && (await isSpeaking())) return false;
 
   Speech.stop();
-  Speech.speak(t, { language: LANGUAGE });
+  Speech.speak(t, {
+    language: LANGUAGE,
+    // `onError`/`stopped` garantiscono che chi attende `onDone` non resti appeso
+    // se la sintesi viene interrotta.
+    onDone,
+    onStopped: onDone,
+    onError: onDone,
+  });
   return true;
 }
 

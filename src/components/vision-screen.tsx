@@ -5,7 +5,11 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { analyzeScene } from '@/lib/analyze';
+import { askQuestion } from '@/lib/ask';
+import { parseCommand } from '@/lib/commands';
 import { speak, stopSpeaking } from '@/lib/speech';
+import { Mode } from '@/lib/types';
+import { useSpeechInput } from '@/lib/use-speech-input';
 
 /**
  * Schermata principale: la fotocamera a schermo intero che osserva la scena e
@@ -31,6 +35,7 @@ export default function VisionScreen() {
   const cameraRef = useRef<CameraView>(null);
 
   const [status, setStatus] = useState<Status>('starting');
+  const [mode, setMode] = useState<Mode>('explore');
   const [cameraReady, setCameraReady] = useState(false);
 
   // Specchi leggibili dentro il loop asincrono.
@@ -38,6 +43,10 @@ export default function VisionScreen() {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+  const modeRef = useRef<Mode>(mode);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
   const busyRef = useRef(false);
   /** Riepilogo dell'ultima scena annunciata: base per rilevare i cambiamenti. */
   const summaryRef = useRef('');
@@ -50,35 +59,57 @@ export default function VisionScreen() {
   const failuresRef = useRef(0);
   /** Guardia: l'avviso di errore è già stato pronunciato una volta. */
   const failureAnnouncedRef = useRef(false);
+  /**
+   * true durante un'interazione vocale (dal segnale "Dimmi" fino alla risposta):
+   * mentre è attiva, il loop di descrizione tace per non parlare sopra l'utente.
+   */
+  const voiceBusyRef = useRef(false);
+  /** Richiesta di risposta a una domanda in corso: annullabile. */
+  const questionAbortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Cattura un frame dalla fotocamera e lo restituisce come JPEG in base64,
+   * ridimensionato per l'invio. Condiviso dal loop di descrizione e dalle
+   * domande vocali (che analizzano lo stesso "adesso" che l'utente ha davanti).
+   */
+  const grabFrame = useCallback(async (): Promise<string | null> => {
+    const cam = cameraRef.current;
+    if (!cam) return null;
+    const photo = await cam.takePictureAsync({
+      quality: 0.5,
+      skipProcessing: true,
+      shutterSound: false,
+    });
+    if (!photo?.uri) return null;
+
+    const context = ImageManipulator.manipulate(photo.uri);
+    context.resize({ width: FRAME_WIDTH });
+    const rendered = await context.renderAsync();
+    const out = await rendered.saveAsync({
+      format: SaveFormat.JPEG,
+      compress: 0.6,
+      base64: true,
+    });
+    return out.base64 ?? null;
+  }, []);
 
   const captureAndDescribe = useCallback(async () => {
-    const cam = cameraRef.current;
-    if (!cam) return;
+    if (!cameraRef.current) return;
     busyRef.current = true;
     let controller: AbortController | null = null;
     try {
-      const photo = await cam.takePictureAsync({
-        quality: 0.5,
-        skipProcessing: true,
-        shutterSound: false,
-      });
-      if (!photo?.uri) return;
-
-      const context = ImageManipulator.manipulate(photo.uri);
-      context.resize({ width: FRAME_WIDTH });
-      const rendered = await context.renderAsync();
-      const out = await rendered.saveAsync({
-        format: SaveFormat.JPEG,
-        compress: 0.6,
-        base64: true,
-      });
-      if (!out.base64) return;
+      const base64 = await grabFrame();
+      if (!base64) return;
 
       // Richiesta annullabile: se l'utente mette in pausa o esce mentre attende
       // la risposta, la abortiamo invece di sprecarla (vedi togglePause/cleanup).
       controller = new AbortController();
       abortRef.current = controller;
-      const scene = await analyzeScene(out.base64, summaryRef.current, controller.signal);
+      const scene = await analyzeScene(base64, {
+        previousSummary: summaryRef.current,
+        mode: modeRef.current,
+        signal: controller.signal,
+      });
 
       // Il server ha risposto: la scena non è più in stato di errore.
       failuresRef.current = 0;
@@ -120,9 +151,10 @@ export default function VisionScreen() {
       if (abortRef.current === controller) abortRef.current = null;
       busyRef.current = false;
     }
-  }, []);
+  }, [grabFrame]);
 
-  // Loop di cattura: gira finché la schermata è montata; agisce solo se attiva.
+  // Loop di cattura: gira finché la schermata è montata; agisce solo se attiva
+  // e non è in corso un'interazione vocale (in tal caso il loop tace).
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
@@ -131,6 +163,7 @@ export default function VisionScreen() {
           cameraReady &&
           cameraRef.current &&
           !busyRef.current &&
+          !voiceBusyRef.current &&
           statusRef.current === 'active'
         ) {
           await captureAndDescribe();
@@ -150,39 +183,147 @@ export default function VisionScreen() {
     if (!cameraReady || welcomedRef.current) return;
     welcomedRef.current = true;
     setStatus('active');
-    speak('SeneGet è attiva. Inquadra ciò che hai davanti.', { force: true });
+    speak(
+      'SeneGet è attiva. Tocca lo schermo per parlarmi e farmi una domanda. Tieni premuto per mettere in pausa.',
+      { force: true },
+    );
   }, [cameraReady]);
 
-  // Alla chiusura della schermata: ferma la voce e annulla l'analisi in corso.
+  // Alla chiusura della schermata: ferma la voce e annulla le richieste in corso.
   useEffect(
     () => () => {
       stopSpeaking();
       abortRef.current?.abort();
+      questionAbortRef.current?.abort();
     },
     [],
   );
 
-  const togglePause = useCallback(() => {
-    setStatus((prev) => {
-      if (prev === 'starting') return prev;
-      const next = prev === 'active' ? 'paused' : 'active';
-      if (next === 'paused') {
-        // In pausa non ha senso spendere una richiesta: annulla quella in corso.
-        abortRef.current?.abort();
-        stopSpeaking();
-        speak('In pausa.', { force: true });
+  /** Imposta una modalità (esplora/cammino) e la conferma a voce. */
+  const applyMode = useCallback((next: Mode) => {
+    setMode((prev) => {
+      if (prev === next) {
+        speak(
+          next === 'walk' ? 'Sei già in modalità cammino.' : 'Sei già in modalità esplora.',
+          { force: true },
+        );
+        return prev;
+      }
+      // Cambiando stile di descrizione, riparte il confronto: il prossimo frame
+      // viene ridescritto con le regole della nuova modalità (senza ripetizioni
+      // ereditate da quella precedente).
+      summaryRef.current = '';
+      lastSpeechRef.current = '';
+      if (next === 'walk') {
+        speak('Modalità cammino. Ti avviso solo dei pericoli davanti a te.', { force: true });
       } else {
-        // Riprendendo, forza una nuova descrizione della scena corrente e
-        // riparte da zero anche il conteggio degli errori (nuovo avviso se serve).
-        summaryRef.current = '';
-        lastSpeechRef.current = '';
-        failuresRef.current = 0;
-        failureAnnouncedRef.current = false;
-        speak('Ripresa.', { force: true });
+        speak("Modalità esplora. Ti descrivo l'ambiente intorno a te.", { force: true });
       }
       return next;
     });
   }, []);
+
+  const doPause = useCallback(() => {
+    setStatus((prev) => {
+      if (prev !== 'active') return prev;
+      // In pausa non ha senso spendere una richiesta: annulla quella in corso.
+      abortRef.current?.abort();
+      stopSpeaking();
+      speak('In pausa.', { force: true });
+      return 'paused';
+    });
+  }, []);
+
+  const doResume = useCallback(() => {
+    setStatus((prev) => {
+      if (prev === 'active') return prev;
+      // Riprendendo, forza una nuova descrizione della scena corrente e riparte
+      // da zero anche il conteggio degli errori (nuovo avviso se serve).
+      summaryRef.current = '';
+      lastSpeechRef.current = '';
+      failuresRef.current = 0;
+      failureAnnouncedRef.current = false;
+      speak('Ripresa.', { force: true });
+      return 'active';
+    });
+  }, []);
+
+  /** Pressione prolungata: alterna pausa e ripresa senza bisogno di parlare. */
+  const togglePause = useCallback(() => {
+    if (statusRef.current === 'paused') doResume();
+    else if (statusRef.current === 'active') doPause();
+  }, [doPause, doResume]);
+
+  /**
+   * Elabora ciò che l'utente ha detto. Se è un comando riconosciuto lo esegue;
+   * altrimenti è una domanda: risponde guardando il frame inquadrato adesso.
+   */
+  const handleTranscript = useCallback(
+    async (text: string) => {
+      const command = parseCommand(text);
+      if (command) {
+        if (command === 'pause') doPause();
+        else if (command === 'resume') doResume();
+        else if (command === 'walk') applyMode('walk');
+        else if (command === 'explore') applyMode('explore');
+        voiceBusyRef.current = false;
+        return;
+      }
+
+      try {
+        const frame = await grabFrame();
+        if (!frame) {
+          speak('Non riesco a vedere in questo momento.', { force: true });
+          return;
+        }
+        // Riempitivo mentre l'AI elabora: l'utente sa di essere stato capito.
+        speak('Un momento.', { force: true });
+        const controller = new AbortController();
+        questionAbortRef.current = controller;
+        const answer = await askQuestion(frame, text, controller.signal);
+        speak(answer || 'Non sono sicuro di cosa hai davanti.', { force: true });
+      } catch (e) {
+        if (e instanceof Error && (e.name === 'AbortError' || /abort/i.test(e.message))) return;
+        console.warn('[vision] domanda fallita:', e instanceof Error ? e.message : e);
+        speak('Non sono riuscito a rispondere. Riprova.', { force: true });
+      } finally {
+        questionAbortRef.current = null;
+        voiceBusyRef.current = false;
+      }
+    },
+    [grabFrame, doPause, doResume, applyMode],
+  );
+
+  const { listening, start: startListening } = useSpeechInput({
+    onResult: handleTranscript,
+    onNoSpeech: () => {
+      voiceBusyRef.current = false;
+      speak('Non ho sentito. Riprova.', { force: true });
+    },
+    onError: (code) => {
+      voiceBusyRef.current = false;
+      if (code === 'not-allowed' || code === 'service-not-allowed') {
+        speak('Serve il permesso del microfono per parlarmi.', { force: true });
+      } else if (code === 'no-speech') {
+        speak('Non ho sentito. Riprova.', { force: true });
+      } else {
+        speak('Non riesco ad ascoltare in questo momento.', { force: true });
+      }
+    },
+  });
+
+  /**
+   * Tocco singolo: parla con l'app (push-to-talk). Ferma la descrizione in
+   * corso, dà un breve segnale ("Dimmi") e — solo quando ha finito di parlare,
+   * per non registrare la propria voce — avvia l'ascolto del microfono.
+   */
+  const startTalking = useCallback(() => {
+    if (!cameraReady || voiceBusyRef.current || listening) return;
+    voiceBusyRef.current = true;
+    abortRef.current?.abort();
+    stopSpeaking();
+    speak('Dimmi.', { force: true, onDone: () => startListening() });
+  }, [cameraReady, listening, startListening]);
 
   // --- Stati dei permessi ---
   if (!permission) {
@@ -211,14 +352,25 @@ export default function VisionScreen() {
   }
 
   const active = status === 'active';
+  const walking = mode === 'walk';
+  const statusText = listening ? 'Ti ascolto…' : active ? 'Attiva' : 'In pausa';
+  const dotColor = listening ? '#0A84FF' : active ? '#30D158' : 'rgba(255,255,255,0.5)';
 
   return (
-    // L'intero schermo è un unico grande pulsante: un tocco mette in pausa o riprende.
+    // L'intero schermo è un grande pulsante: un tocco parla con l'app (fai una
+    // domanda o dai un comando a voce); una pressione prolungata mette in pausa
+    // o riprende senza bisogno di parlare.
     <Pressable
       style={styles.black}
-      onPress={togglePause}
+      onPress={startTalking}
+      onLongPress={togglePause}
+      delayLongPress={500}
       accessibilityRole="button"
-      accessibilityLabel={active ? 'In ascolto. Tocca per mettere in pausa.' : 'In pausa. Tocca per riprendere.'}
+      accessibilityLabel={
+        `${statusText}. ` +
+        `${walking ? 'Modalità cammino' : 'Modalità esplora'}. ` +
+        'Tocca per parlarmi e farmi una domanda. Tieni premuto per mettere in pausa o riprendere.'
+      }
     >
       <CameraView
         ref={cameraRef}
@@ -229,17 +381,20 @@ export default function VisionScreen() {
       />
 
       <SafeAreaView style={styles.overlay} pointerEvents="none">
-        {/* Indicatore di stato minimale (nessuna descrizione a schermo). */}
+        {/* Indicatori di stato minimali (nessuna descrizione a schermo). */}
         <View style={styles.topBar}>
           <View style={styles.pill}>
-            <View style={[styles.dot, { backgroundColor: active ? '#30D158' : 'rgba(255,255,255,0.5)' }]} />
-            <Text style={styles.pillText}>{active ? 'In ascolto' : 'In pausa'}</Text>
+            <View style={[styles.dot, { backgroundColor: dotColor }]} />
+            <Text style={styles.pillText}>{statusText}</Text>
+          </View>
+          <View style={styles.pill}>
+            <Text style={styles.pillText}>{walking ? '🚶 Cammino' : '🔍 Esplora'}</Text>
           </View>
         </View>
 
         <View style={styles.spacer} />
 
-        <Text style={styles.hint}>Tocca lo schermo per {active ? 'mettere in pausa' : 'riprendere'}</Text>
+        <Text style={styles.hint}>Tocca per parlare · Tieni premuto per pausa</Text>
       </SafeAreaView>
     </Pressable>
   );
@@ -261,7 +416,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   topBar: {
+    flexDirection: 'row',
+    justifyContent: 'center',
     alignItems: 'center',
+    gap: 8,
     paddingTop: 8,
   },
   spacer: {

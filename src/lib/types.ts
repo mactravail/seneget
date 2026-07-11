@@ -5,6 +5,13 @@
  * questi dati, che esistono solo per generare la frase da pronunciare a voce.
  */
 
+/**
+ * Modalità d'uso dell'app.
+ * - `explore`: descrizione ricca dell'ambiente (l'utente è fermo o osserva).
+ * - `walk`: l'utente sta camminando; frasi brevissime, solo pericoli sul percorso.
+ */
+export type Mode = 'explore' | 'walk';
+
 /** Posizione orizzontale di un oggetto rispetto a chi impugna il telefono. */
 export type Position = 'sinistra' | 'centro' | 'destra' | 'unknown';
 

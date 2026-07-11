@@ -38,6 +38,14 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "SeneGet usa il microfono per ascoltare le tue domande e i tuoi comandi vocali.",
+          "speechRecognitionPermission": "SeneGet usa il riconoscimento vocale per capire cosa le chiedi e risponderti a voce.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+        }
       ]
     ],
     "experiments": {

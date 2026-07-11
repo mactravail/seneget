@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getUserFromRequest } from '@/lib/supabase-admin';
 import {
   DetectedObject,
+  Mode,
   MOVEMENTS,
   Movement,
   POSITIONS,
@@ -51,10 +52,32 @@ CAMPI DA RESTITUIRE
 
 Rispondi esclusivamente con i campi richiesti dallo schema.`;
 
+/**
+ * Blocco aggiunto in coda al prompt quando l'utente è in MODALITÀ CAMMINO.
+ * Sta camminando col telefono in mano: deve sentire pochissime parole, solo se
+ * riguardano la sicurezza del percorso. Le istruzioni qui in fondo hanno la
+ * precedenza sullo stile descrittivo di "explore".
+ */
+const WALK_OVERRIDE = `
+MODALITÀ CAMMINO ATTIVA (la persona sta camminando: la priorità assoluta è la sicurezza)
+- Parla pochissimo e solo per aiutarla a camminare senza farsi male.
+- Frasi brevissime, poche parole. Esempi: "Attento, gradino davanti.", "Persona davanti a te.", "Auto da sinistra.", "Muro a un metro.", "Via libera."
+- Segnala SOLO ciò che riguarda il cammino: ostacoli sul percorso, gradini o scale, dislivelli e buche, porte o passaggi stretti, persone o veicoli che si avvicinano o attraversano davanti.
+- Ignora tutto ciò che non serve a camminare: colori, decorazioni, dettagli estetici, oggetti lontani o fuori dal percorso.
+- Se davanti è tutto libero e non è cambiato nulla di rilevante per la sicurezza, imposta "changed" a false e "speech" a "". Non riempire il silenzio.
+- Imposta "alert" a true per qualsiasi pericolo immediato sul percorso (un gradino, un ostacolo vicino, un veicolo o una persona in avvicinamento).`;
+
+/** Compone il prompt di sistema per la modalità richiesta. */
+function systemFor(mode: Mode): string {
+  return mode === 'walk' ? `${SYSTEM}\n${WALK_OVERRIDE}` : SYSTEM;
+}
+
 interface AnalyzeBody {
   image?: string;
   /** Riepilogo della scena descritta al frame precedente (per il confronto). */
   previousSummary?: string;
+  /** Modalità d'uso: `explore` (descrizione ricca) o `walk` (solo pericoli). */
+  mode?: Mode;
 }
 
 /** Normalizza un oggetto rilevato nella forma `DetectedObject`. */
@@ -127,6 +150,8 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'Campo "image" (JPEG base64) mancante.' }, { status: 400 });
   }
 
+  const mode: Mode = body.mode === 'walk' ? 'walk' : 'explore';
+
   const previousSummary =
     typeof body.previousSummary === 'string' ? body.previousSummary.trim() : '';
   const userText = previousSummary
@@ -137,7 +162,7 @@ export async function POST(request: Request): Promise<Response> {
     const message = await client.messages.create({
       model: MODEL,
       max_tokens: 1024,
-      system: SYSTEM,
+      system: systemFor(mode),
       messages: [
         {
           role: 'user',
