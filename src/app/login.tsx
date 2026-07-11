@@ -1,6 +1,7 @@
 import { useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -14,14 +15,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useAuth } from '@/lib/auth';
+
 /**
  * Pagina di login — raggiunta dalla landing web premendo «Provala».
  * Dopo l'accesso porta alla fotocamera (`/vision`), il cuore dell'app.
  *
- * Nota: non c'è ancora un backend di autenticazione. Il form è funzionale
- * (stato, validazione minima) ma l'accesso è simulato: «Entra» conduce
- * direttamente all'app. Quando ci sarà un backend, basterà sostituire
- * `submit()` con la vera chiamata e navigare al successo.
+ * Autenticazione reale via Supabase (email/password). «Continua come ospite»
+ * apre una sessione anonima Supabase. In ogni caso, al successo si entra in
+ * `/vision`; l'AuthProvider tiene la sessione persistita tra i riavvii.
  *
  * Costruita con primitive React Native per restare coerente con lo stack e
  * con l'estetica dark/iOS dell'app.
@@ -47,6 +49,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function LoginScreen() {
   const router = useRouter();
+  const { signInWithPassword, signUp, signInAnonymously } = useAuth();
 
   // Logo responsive, mobile-first: parte da una taglia adatta ai telefoni
   // e cresce con lo schermo, restando entro limiti leggibili.
@@ -59,6 +62,8 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const isRegister = mode === 'register';
 
@@ -73,7 +78,8 @@ export default function LoginScreen() {
     else router.replace('/');
   }, [router]);
 
-  const submit = useCallback(() => {
+  const submit = useCallback(async () => {
+    if (submitting) return;
     const mail = email.trim();
     if (!EMAIL_RE.test(mail)) {
       setError('Inserisci un indirizzo email valido.');
@@ -84,12 +90,45 @@ export default function LoginScreen() {
       return;
     }
     setError(null);
-    // TODO: qui andrà la vera autenticazione. Per ora si entra direttamente.
+    setNotice(null);
+    setSubmitting(true);
+    const res = isRegister
+      ? await signUp(mail, password)
+      : await signInWithPassword(mail, password);
+    setSubmitting(false);
+
+    if (res.error) {
+      setError(res.error);
+      return;
+    }
+    if (res.needsEmailConfirmation) {
+      // Il progetto Supabase richiede la conferma via email: non c'è ancora
+      // sessione, quindi non si entra. Invitiamo a confermare e poi accedere.
+      setNotice("Ti abbiamo inviato un'email di conferma. Aprila per attivare l'account, poi accedi.");
+      setMode('login');
+      setPassword('');
+      return;
+    }
     enterApp();
-  }, [email, password, enterApp]);
+  }, [submitting, email, password, isRegister, signUp, signInWithPassword, enterApp]);
+
+  const continueAsGuest = useCallback(async () => {
+    if (submitting) return;
+    setError(null);
+    setNotice(null);
+    setSubmitting(true);
+    const res = await signInAnonymously();
+    setSubmitting(false);
+    if (res.error) {
+      setError(res.error);
+      return;
+    }
+    enterApp();
+  }, [submitting, signInAnonymously, enterApp]);
 
   const toggleMode = useCallback(() => {
     setError(null);
+    setNotice(null);
     setMode((m) => (m === 'login' ? 'register' : 'login'));
   }, []);
 
@@ -201,21 +240,37 @@ export default function LoginScreen() {
               </View>
             </View>
 
-            {/* Errore di validazione */}
+            {/* Errore di validazione o autenticazione */}
             {error && (
               <Text style={styles.error} accessibilityLiveRegion="polite" role="alert">
                 {error}
               </Text>
             )}
 
+            {/* Avviso informativo (es. conferma email) */}
+            {notice && (
+              <Text style={styles.notice} accessibilityLiveRegion="polite">
+                {notice}
+              </Text>
+            )}
+
             {/* CTA principale */}
             <Pressable
               onPress={submit}
+              disabled={submitting}
               accessibilityRole="button"
+              accessibilityState={{ disabled: submitting, busy: submitting }}
               accessibilityLabel={isRegister ? 'Crea account ed entra' : 'Accedi ed entra nell’app'}
-              style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                (pressed || submitting) && styles.pressed,
+              ]}
             >
-              <Text style={styles.primaryBtnText}>{isRegister ? 'Registrati' : 'Entra'}</Text>
+              {submitting ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.primaryBtnText}>{isRegister ? 'Registrati' : 'Entra'}</Text>
+              )}
             </Pressable>
 
             {/* Divisore */}
@@ -225,12 +280,14 @@ export default function LoginScreen() {
               <View style={styles.dividerLine} />
             </View>
 
-            {/* Prova senza account */}
+            {/* Prova senza account — apre una sessione anonima Supabase */}
             <Pressable
-              onPress={enterApp}
+              onPress={continueAsGuest}
+              disabled={submitting}
               accessibilityRole="button"
+              accessibilityState={{ disabled: submitting }}
               accessibilityLabel="Continua come ospite ed entra nell’app"
-              style={({ pressed }) => [styles.ghostBtn, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.ghostBtn, (pressed || submitting) && styles.pressed]}
             >
               <Text style={styles.ghostBtnText}>Continua come ospite</Text>
             </Pressable>
@@ -340,6 +397,13 @@ const styles = StyleSheet.create({
     color: C.red,
     fontSize: 14,
     fontWeight: '600',
+    marginTop: -4,
+  },
+  notice: {
+    color: C.green,
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 20,
     marginTop: -4,
   },
   primaryBtn: {

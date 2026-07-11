@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 
+import { getUserFromRequest } from '@/lib/supabase-admin';
 import {
   DetectedObject,
   MOVEMENTS,
@@ -18,6 +19,12 @@ const MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
 // Client istanziato una volta a livello di modulo (riusato tra le richieste),
 // invece di ricrearlo a ogni frame. Legge ANTHROPIC_API_KEY dall'ambiente.
 const client = new Anthropic();
+
+// Se `true`, /api/analyze richiede un token Supabase valido (401 altrimenti):
+// protegge l'endpoint a pagamento. Default `false` per non rompere l'app
+// finché gli accessi anonimi non sono abilitati sul dashboard. Il token viene
+// comunque verificato quando presente (vedi getUserFromRequest).
+const REQUIRE_AUTH = process.env.ANALYZE_REQUIRE_AUTH === 'true';
 
 const SYSTEM = `Sei gli occhi di una persona cieca. Osservi una singola immagine ripresa dalla fotocamera del suo telefono, tenuto davanti a sé mentre cammina. Il tuo compito è descriverle a voce, in italiano, ciò che ha davanti, per aiutarla a muoversi in sicurezza.
 
@@ -95,6 +102,16 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json(
       { error: 'ANTHROPIC_API_KEY non configurata sul server (crea un file .env).' },
       { status: 500 },
+    );
+  }
+
+  // Verifica il token Supabase se presente. Con ANALYZE_REQUIRE_AUTH=true, una
+  // richiesta senza utente valido viene respinta prima di chiamare (e pagare) Claude.
+  const user = await getUserFromRequest(request);
+  if (REQUIRE_AUTH && !user) {
+    return Response.json(
+      { error: 'Autenticazione richiesta per usare questo servizio.' },
+      { status: 401 },
     );
   }
 

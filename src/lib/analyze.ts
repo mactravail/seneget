@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
+import { supabase } from './supabase';
 import { Scene } from './types';
 
 /**
@@ -33,9 +34,18 @@ export async function analyzeScene(
   previousSummary?: string,
   signal?: AbortSignal,
 ): Promise<Scene> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+  // Allega il token della sessione Supabase (se presente): la route /api/analyze
+  // può usarlo per verificare l'utente. In assenza di sessione la richiesta parte
+  // comunque — l'app deve funzionare anche prima che l'auth sia pienamente attiva.
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(`${getApiBase()}/api/analyze`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ image: imageBase64, previousSummary }),
     signal,
   });
